@@ -1,13 +1,14 @@
 # Raspberry Pi AI Assistant
 
-A smart command-line assistant specifically designed for Raspberry Pi users. It provides system information, executes safe commands, and helps with common Raspberry Pi tasks using either cloud-based (Claude) or local AI models.
-
 ## Features
 
 - Split-screen terminal interface with command history
 - Secure API key storage with encryption
 - Automatic command execution for system queries
-- Support for both cloud (Claude) and local (Ollama) models
+- Support for multiple AI providers:
+  - Google Gemini (1.5 Pro, 2.0)
+  - Anthropic Claude
+  - Local models via Ollama
 - Smart handling of system commands and information
 - Context-aware responses based on your Pi's configuration
 
@@ -38,10 +39,20 @@ python3 pi_assistant.py
 ## Configuration
 
 On first run, you'll be prompted to choose between:
-1. Cloud Models (requires Anthropic API key)
+1. Cloud Models:
+   - Google Gemini (requires Google AI API key)
+   - Claude (requires Anthropic API key)
 2. Local Models (requires Ollama installation)
 
-### Using Cloud Models (Claude)
+### Using Cloud Models
+
+#### Google Gemini
+1. Get an API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
+2. When prompted, enter your API key
+3. Choose from available Gemini models (1.5 Pro, 2.0)
+4. Create a password to encrypt the API key
+
+#### Claude
 1. Get an API key from [Anthropic](https://www.anthropic.com/)
 2. When prompted, enter your API key
 3. Create a password to encrypt the API key
@@ -84,6 +95,10 @@ Assistant: SSH service status: active (running)
 - The last 3 prompts are shown in red at the bottom of the screen
 - System information commands execute automatically
 - Complex operations will ask for confirmation before proceeding
+- Each model has different strengths:
+  - Gemini: Great for technical tasks and code
+  - Claude: Strong at analysis and explanation
+  - Local: Works offline, good for basic tasks
 
 ## Requirements
 - Python 3.7+
