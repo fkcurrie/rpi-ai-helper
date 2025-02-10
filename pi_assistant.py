@@ -405,6 +405,10 @@ The system uses apt for package management and systemctl for service control."""
                         release_date = f"{date_str[6:8]}/{date_str[4:6]}/{date_str[:4]}"
                         models.append((model.id, False, 'claude', descriptions[variant], release_date))
         
+        if not models:
+            print("No models available. Please install a local model or provide an API key.")
+            exit(1)
+        
         print("\nAvailable models:")
         
         # Prepare simplified table data
