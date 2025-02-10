@@ -27,41 +27,91 @@ class ConsoleManager:
         self.input_height = 3
         self.output_height = self.height - self.input_height - 1  # -1 for separator
         
-        # Clear screen and hide cursor
-        print("\033[2J\033[H", end="")  # Clear screen and move to top
+        # Clear screen and move to top
+        print("\033[2J\033[H", end="")
+        
+        # Draw initial separator
         self.draw_separator()
+        
+        # Initialize output buffer
+        self.output_buffer = []
+        
+        # Add prompt history
+        self.prompt_history = []
+        self.max_history = 3
 
     def draw_separator(self):
         """Draw line separator between output and input areas"""
         separator_pos = self.height - self.input_height - 1
-        print(f"\033[{separator_pos};0H" + "─" * self.width)
+        print(f"\033[{separator_pos};0H" + "-" * self.width)
 
     def print_output(self, text: str):
-        """Print text in the output area (top section)"""
-        # Save cursor position
-        print("\033[s", end="")
-        
-        # Move to top of screen
+        """Print text in the output area with proper word wrapping"""
+        # Clear output area
+        print("\033[H", end="")
+        for i in range(self.output_height):
+            print(" " * self.width)
         print("\033[H", end="")
         
-        # Print text, handling word wrap
+        # Add text to buffer and trim if needed
         lines = text.split('\n')
         for line in lines:
-            # Word wrap long lines
-            while len(line) > self.width:
-                print(line[:self.width])
-                line = line[self.width:]
-            print(line)
+            # Word wrap
+            words = line.split()
+            current_line = ""
+            for word in words:
+                if len(current_line) + len(word) + 1 <= self.width:
+                    current_line += word + " "
+                else:
+                    self.output_buffer.append(current_line)
+                    current_line = word + " "
+            if current_line:
+                self.output_buffer.append(current_line)
         
-        # Restore cursor position
-        print("\033[u", end="")
+        # Trim buffer to fit output area
+        while len(self.output_buffer) > self.output_height:
+            self.output_buffer.pop(0)
         
+        # Print buffer
+        print("\033[H", end="")
+        for line in self.output_buffer:
+            print(f"{line:<{self.width}}")
+        
+        # Redraw separator
+        self.draw_separator()
+
+    def print_input_history(self):
+        """Display last 3 prompts in input area"""
+        # Clear input area first
+        self.clear_input_area()
+        
+        # Calculate starting position for history
+        start_pos = self.height - self.input_height
+        
+        # Show last 3 prompts (or fewer if history is shorter)
+        for i, prompt in enumerate(self.prompt_history[-self.max_history:]):
+            print(f"\033[{start_pos + i};0H\033[K\033[31m{prompt}\033[0m")
+
     def get_input(self, prompt: str = "You: ") -> str:
         """Get input from the bottom section"""
-        # Move cursor to input area
-        input_pos = self.height - 2  # One line up from bottom
-        print(f"\033[{input_pos};0H\033[K{prompt}", end="", flush=True)
-        return input(prompt)
+        # Show history first
+        self.print_input_history()
+        
+        # Move cursor to input position and get new input
+        input_pos = self.height - 1  # Bottom line
+        print(f"\033[{input_pos};0H\033[K\033[31m{prompt}", end="", flush=True)
+        user_input = input()
+        print("\033[0m", end="")  # Reset color
+        
+        # Add to history (full prompt + input)
+        if user_input.strip():  # Only add non-empty inputs
+            full_prompt = f"{prompt}{user_input}"
+            self.prompt_history.append(full_prompt)
+            # Keep only last 3 prompts
+            if len(self.prompt_history) > self.max_history:
+                self.prompt_history.pop(0)
+        
+        return user_input
 
     def clear_input_area(self):
         """Clear the input area"""
@@ -339,63 +389,32 @@ The system uses apt for package management and systemctl for service control."""
                                 if not latest_models[variant] or model.id > latest_models[variant].id:
                                     latest_models[variant] = model
                 
-                # Add latest models with descriptions
+                # Add latest models with descriptions and dates
                 descriptions = {
-                    'opus': "Most capable model for complex reasoning and analysis",
-                    'sonnet': "Balanced model for general use and coding tasks",
-                    'haiku': "Fast, efficient model for simpler tasks"
+                    'opus': "Most capable model for complex tasks",
+                    'sonnet': "Balanced model for general use",
+                    'haiku': "Fast model for simple tasks"
                 }
                 
+                # Extract and format dates from model IDs
                 for variant, model in latest_models.items():
                     if model:
-                        models.append((model.id, False, 'claude', descriptions[variant]))
-                        
-            except Exception as e:
-                print(f"Error getting Claude models: {e}")
-        
-        # Add installed Ollama models
-        if self.ollama_available:
-            try:
-                process = subprocess.run(['ollama', 'list'], stdout=subprocess.PIPE, text=True)
-                if process.returncode == 0:
-                    for line in process.stdout.strip().split('\n')[1:]:  # Skip header
-                        if line:
-                            parts = line.split()
-                            if len(parts) >= 3:
-                                name = parts[0]
-                                size = parts[2]
-                                description = self._get_ollama_model_description(name)
-                                models.append((name, True, 'ollama', description))
-            except Exception as e:
-                print(f"Error getting Ollama models: {e}")
-        
-        if not models:
-            print("No models available. Please install a local model or provide an API key.")
-            exit(1)
+                        # Extract date from model ID (format: YYYYMMDD)
+                        date_str = model.id.split('-')[-1]
+                        # Convert to dd/mm/yyyy format
+                        release_date = f"{date_str[6:8]}/{date_str[4:6]}/{date_str[:4]}"
+                        models.append((model.id, False, 'claude', descriptions[variant], release_date))
         
         print("\nAvailable models:")
         
-        # Prepare table data
-        headers = ["#", "Model", "Type", "Size", "Description"]
+        # Prepare simplified table data
+        headers = ["#", "Model", "Description", "Released"]
         rows = []
         
-        for i, (model, is_local, model_type, description) in enumerate(models, 1):
-            if is_local and model_type == 'ollama':
-                rows.append([
-                    str(i),
-                    model,
-                    "Local (Ollama)",
-                    size,
-                    description
-                ])
-            else:  # Cloud models (Claude)
-                rows.append([
-                    str(i),
-                    model,
-                    "Cloud",
-                    "N/A",
-                    description
-                ])
+        for i, (model, _, _, description, release_date) in enumerate(models, 1):
+            # Simplify model name by removing date
+            model_name = model.split('-2024')[0]
+            rows.append([str(i), model_name, description, release_date])
         
         print(self._create_ascii_table(headers, rows))
         
@@ -404,11 +423,11 @@ The system uses apt for package management and systemctl for service control."""
             try:
                 choice = input("\nSelect a model number (or press Enter for default): ").strip()
                 if not choice:
-                    model, is_local, model_type, _ = models[0]
+                    model, is_local, model_type, _, _ = models[0]
                 else:
                     choice_idx = int(choice) - 1
                     if 0 <= choice_idx < len(models):
-                        model, is_local, model_type, _ = models[choice_idx]
+                        model, is_local, model_type, _, _ = models[choice_idx]
                     else:
                         print("Invalid selection. Please try again.")
                         continue
@@ -507,69 +526,50 @@ The system uses apt for package management and systemctl for service control."""
         console.print_output("- Formatted query context")
         
         console.print_output("\n=== Analyzing Query ===")
-        analysis_prompt = f"""Based on this context and query, determine:
-1. Is this a simple factual question that can be answered directly?
-2. Are there ambiguities or missing details that need clarification?
-3. Could multiple valid approaches exist based on unstated requirements?
-
-If the query is simple and clear:
-- Provide a direct, concise answer
-- Include relevant facts from system context
-- No need for clarifying questions
-
-If the query is ambiguous or complex:
-- List 2-3 essential clarifying questions
-- Explain why these details matter
-- Wait for user responses before proceeding
+        
+        # Create analysis prompt
+        analysis_prompt = f"""Based on this query and system context, provide a helpful response.
+For system information queries:
+1. If the query can be answered with a command, ONLY provide the command in a code block
+2. DO NOT provide explanations unless specifically asked
+3. Use only safe, read-only commands like: cat, ls, df, free, uname, vcgencmd
 
 Context:
-{context}"""
-
-        console.print_output("- Sending analysis prompt to model...")
-        analysis = self._make_api_request(analysis_prompt)
-        
-        # Check if clarifying questions are needed
-        if '?' in analysis and any(trigger in query.lower() for trigger in ['how', 'which', 'what should', 'recommend', 'suggest']):
-            console.print_output("\n=== Clarifying Questions ===")
-            questions = [q.strip() for q in analysis.split('\n') if '?' in q]
-            answers = {}
-            for q in questions:
-                answer = console.get_input(f"\n{q}\n> ")
-                answers[q] = answer
-            
-            # Get response with user's answers
-            console.print_output("\n=== Generating Informed Response ===")
-            response_prompt = f"""Based on user's responses:
-{answers}
-
-And the original context:
 {context}
 
-Provide a tailored response that:
-1. Addresses their specific needs
-2. Explains relevant options
-3. Makes appropriate recommendations
-4. Asks if they'd like to proceed with any specific solution
-
-DO NOT suggest installations yet - wait for user to choose a direction."""
-            
-            response = self._make_api_request(response_prompt)
-        else:
-            # Direct response for simple queries
-            response = analysis
-
-        # Update conversation history
-        self.conversation_history.append({
-            "role": "user",
-            "content": query,
-            "context": context
-        })
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": response
-        })
+Query:
+{query}
+"""
         
-        return response
+        analysis = self._make_api_request(analysis_prompt)
+        
+        # Extract and execute safe informative commands
+        command_results = []
+        if '```' in analysis:
+            commands = analysis.split('```')[1::2]  # Get all commands between backticks
+            
+            # Check if these are informative (read-only) commands
+            safe_commands = ['cat', 'ls', 'df', 'free', 'uname', 'vcgencmd']
+            is_informative = all(any(cmd.strip().startswith(safe) for safe in safe_commands) 
+                               for cmd in commands)
+            
+            if is_informative:
+                for command in commands:
+                    command = command.strip()
+                    success, result = self.execute_command(command)
+                    if success:
+                        # For temperature queries, format the result nicely
+                        if 'temp' in command:
+                            temp = int(result.strip()) / 1000
+                            command_results.append(f"The current CPU temperature is {temp:.1f}°C")
+                        else:
+                            command_results.append(result.strip())
+        
+        # Return just the command output if available, otherwise the full response
+        if command_results:
+            return "\n".join(command_results)
+        else:
+            return analysis
 
     def execute_with_confirmation(self, command: str) -> Tuple[bool, str]:
         """Execute command with confirmation and real-time output"""
@@ -1193,135 +1193,84 @@ Please research and provide information about:
         import base64
         import getpass
         
-        env_file = '.env'
         encrypted_file = '.env.encrypted'
         
         # Check for existing encrypted file
         if os.path.exists(encrypted_file):
-            try:
-                # Get password from user
-                password = getpass.getpass("Enter password to decrypt API keys: ")
-                key = base64.b64encode(password.encode().ljust(32)[:32])
-                f = Fernet(key)
-                
-                # Decrypt file
-                with open(encrypted_file, 'rb') as file:
-                    encrypted_data = file.read()
-                    decrypted_data = f.decrypt(encrypted_data)
-                    
-                # Parse decrypted data
-                for line in decrypted_data.decode().split('\n'):
-                    if '=' in line:
-                        key, value = line.strip().split('=', 1)
-                        os.environ[key] = value
-                
-                return
-            except Exception as e:
-                print(f"Error decrypting credentials: {e}")
-        
-        # If no encrypted file or decryption failed
-        if os.path.exists(env_file):
-            # Ask if user wants to encrypt existing .env
-            if input("\nWould you like to encrypt your .env file? (y/n): ").lower() == 'y':
+            max_attempts = 3
+            for attempt in range(max_attempts):
                 try:
-                    # Get new password
-                    while True:
-                        password = getpass.getpass("Enter new password for encryption: ")
-                        confirm = getpass.getpass("Confirm password: ")
-                        if password == confirm:
-                            break
-                    
+                    # Get password from user
+                    password = getpass.getpass("Enter password to decrypt API keys: ")
                     key = base64.b64encode(password.encode().ljust(32)[:32])
                     f = Fernet(key)
                     
-                    # Read and encrypt .env contents
-                    with open(env_file, 'rb') as file:
-                        data = file.read()
-                        encrypted_data = f.encrypt(data)
+                    # Decrypt file
+                    with open(encrypted_file, 'rb') as file:
+                        encrypted_data = file.read()
+                        decrypted_data = f.decrypt(encrypted_data)
+                        
+                    # Parse decrypted data
+                    for line in decrypted_data.decode().split('\n'):
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            os.environ[key] = value
+                            if key == 'ANTHROPIC_API_KEY':
+                                self.api_key = value
                     
-                    # Save encrypted file
-                    with open(encrypted_file, 'wb') as file:
-                        file.write(encrypted_data)
-                    
-                    # Optionally delete original .env
-                    if input("Delete original .env file? (y/n): ").lower() == 'y':
-                        os.remove(env_file)
-                    
-                    print(f"\nCredentials encrypted and saved to {encrypted_file}")
+                    print("API key loaded successfully!")
+                    return
                     
                 except Exception as e:
-                    print(f"Error encrypting credentials: {e}")
+                    if attempt < max_attempts - 1:
+                        print("Incorrect password. Please try again.")
+                    else:
+                        print(f"Error decrypting credentials after {max_attempts} attempts.")
         
-        # Load API key from environment if available
+        # If we get here, either no encrypted file exists or decryption failed
         self.api_key = os.getenv('ANTHROPIC_API_KEY')
+        
+        if not self.api_key:
+            print("\nNo API key found.")
+            if input("Would you like to enter an API key now? (y/n): ").lower() == 'y':
+                api_key = getpass.getpass("Enter your API key: ").strip()
+                self._save_encrypted_credentials({'ANTHROPIC_API_KEY': api_key})
+                self.api_key = api_key
 
     def _save_encrypted_credentials(self, credentials: Dict) -> None:
         """Save encrypted credentials to file"""
-        from cryptography.fernet import Fernet
-        import base64
-        
-        env_file = '.env'
-        encrypted_file = '.env.encrypted'
-        
-        # Check for existing encrypted file
-        if os.path.exists(encrypted_file):
-            try:
-                # Get password from user
-                password = getpass.getpass("Enter password to decrypt API keys: ")
-                key = base64.b64encode(password.encode().ljust(32)[:32])
-                f = Fernet(key)
-                
-                # Decrypt file
-                with open(encrypted_file, 'rb') as file:
-                    encrypted_data = file.read()
-                    decrypted_data = f.decrypt(encrypted_data)
-                    
-                # Parse decrypted data
-                for line in decrypted_data.decode().split('\n'):
-                    if '=' in line:
-                        key, value = line.strip().split('=', 1)
-                        os.environ[key] = value
-                
-                return
-            except Exception as e:
-                print(f"Error decrypting credentials: {e}")
-        
-        # If no encrypted file or decryption failed
-        if os.path.exists(env_file):
-            # Ask if user wants to encrypt existing .env
-            if input("\nWould you like to encrypt your .env file? (y/n): ").lower() == 'y':
-                try:
-                    # Get new password
-                    while True:
-                        password = getpass.getpass("Enter new password for encryption: ")
-                        confirm = getpass.getpass("Confirm password: ")
-                        if password == confirm:
-                            break
-                    
-                    key = base64.b64encode(password.encode().ljust(32)[:32])
-                    f = Fernet(key)
-                    
-                    # Read and encrypt .env contents
-                    with open(env_file, 'rb') as file:
-                        data = file.read()
-                        encrypted_data = f.encrypt(data)
-                    
-                    # Save encrypted file
-                    with open(encrypted_file, 'wb') as file:
-                        file.write(encrypted_data)
-                    
-                    # Optionally delete original .env
-                    if input("Delete original .env file? (y/n): ").lower() == 'y':
-                        os.remove(env_file)
-                    
-                    print(f"\nCredentials encrypted and saved to {encrypted_file}")
-                    
-                except Exception as e:
-                    print(f"Error encrypting credentials: {e}")
-        
-        # Save credentials to environment
-        for key, value in credentials.items():
-            os.environ[key] = value
+        try:
+            # Get password for encryption
+            while True:
+                password = getpass.getpass("\nCreate a password to encrypt your API key: ")
+                confirm = getpass.getpass("Confirm password: ")
+                if password == confirm:
+                    break
+            
+            # Create encryption key from password
+            key = base64.b64encode(password.encode().ljust(32)[:32])
+            f = Fernet(key)
+            
+            # Format credentials as env file content
+            env_content = '\n'.join(f"{k}={v}" for k, v in credentials.items())
+            
+            # Encrypt the content
+            encrypted_data = f.encrypt(env_content.encode())
+            
+            # Save to encrypted file
+            with open('.env.encrypted', 'wb') as file:
+                file.write(encrypted_data)
+            
+            print("\nAPI key encrypted and saved successfully!")
+            print("Your key will be automatically loaded next time using your password.")
+            
+            # Update current environment
+            for key, value in credentials.items():
+                os.environ[key] = value
+            
+        except Exception as e:
+            print(f"\nError saving credentials: {e}")
+            print("Please try again or contact support.")
 
 def main():
     console = ConsoleManager()

@@ -5439,3 +5439,4 @@ pi_assistant_env/lib/python3.11/site-packages/yaml/__pycache__/scanner.cpython-3
 pi_assistant_env/lib/python3.11/site-packages/yaml/__pycache__/serializer.cpython-311.pyc
 pi_assistant_env/lib/python3.11/site-packages/yaml/__pycache__/tokens.cpython-311.pyc
 __pycache__/config.cpython-311.pyc
+.env.encrypted
