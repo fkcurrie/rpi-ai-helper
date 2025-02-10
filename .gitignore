@@ -1,3 +1,4 @@
+.gitignore
 pi_assistant_env/bin/activate
 pi_assistant_env/bin/activate.csh
 pi_assistant_env/bin/activate.fish
@@ -26301,3 +26302,4 @@ google-cloud-sdk/platform/gsutil/third_party/urllib3/test/with_dummyserver/test_
 google-cloud-sdk/platform/gsutil/third_party/urllib3/test/with_dummyserver/test_socketlevel.py
 google-cloud-sdk/rpm/mapping/command_mapping.yaml
 google-cloud-sdk/rpm/mapping/component_mapping.yaml
+.gitignore
