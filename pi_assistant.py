@@ -14,6 +14,59 @@ from ollama import Client as OllamaClient  # For Ollama models
 from cryptography.fernet import Fernet
 import base64
 import getpass
+import shutil
+
+class ConsoleManager:
+    def __init__(self):
+        # Get terminal size
+        self.term_size = shutil.get_terminal_size()
+        self.width = self.term_size.columns
+        self.height = self.term_size.lines
+        
+        # Reserve bottom 3 lines for input
+        self.input_height = 3
+        self.output_height = self.height - self.input_height - 1  # -1 for separator
+        
+        # Clear screen and hide cursor
+        print("\033[2J\033[H", end="")  # Clear screen and move to top
+        self.draw_separator()
+
+    def draw_separator(self):
+        """Draw line separator between output and input areas"""
+        separator_pos = self.height - self.input_height - 1
+        print(f"\033[{separator_pos};0H" + "─" * self.width)
+
+    def print_output(self, text: str):
+        """Print text in the output area (top section)"""
+        # Save cursor position
+        print("\033[s", end="")
+        
+        # Move to top of screen
+        print("\033[H", end="")
+        
+        # Print text, handling word wrap
+        lines = text.split('\n')
+        for line in lines:
+            # Word wrap long lines
+            while len(line) > self.width:
+                print(line[:self.width])
+                line = line[self.width:]
+            print(line)
+        
+        # Restore cursor position
+        print("\033[u", end="")
+        
+    def get_input(self, prompt: str = "You: ") -> str:
+        """Get input from the bottom section"""
+        # Move cursor to input area
+        input_pos = self.height - 2  # One line up from bottom
+        print(f"\033[{input_pos};0H\033[K{prompt}", end="", flush=True)
+        return input(prompt)
+
+    def clear_input_area(self):
+        """Clear the input area"""
+        for i in range(self.input_height):
+            print(f"\033[{self.height-i};0H\033[K", end="")
 
 class RaspberryPiAssistant:
     def __init__(self):
@@ -445,15 +498,15 @@ The system uses apt for package management and systemctl for service control."""
             
         return "\n".join(formatted)
 
-    def process_user_query(self, query: str) -> str:
+    def process_user_query(self, query: str, console: ConsoleManager) -> str:
         """Process user query using RAG approach"""
-        print("\n=== Building Context ===")
+        console.print_output("\n=== Building Context ===")
         context = self._build_rag_context(query)
-        print("- Gathered system information")
-        print("- Added conversation history")
-        print("- Formatted query context")
+        console.print_output("- Gathered system information")
+        console.print_output("- Added conversation history")
+        console.print_output("- Formatted query context")
         
-        print("\n=== Analyzing Query ===")
+        console.print_output("\n=== Analyzing Query ===")
         analysis_prompt = f"""Based on this context and query, determine:
 1. Is this a simple factual question that can be answered directly?
 2. Are there ambiguities or missing details that need clarification?
@@ -472,20 +525,20 @@ If the query is ambiguous or complex:
 Context:
 {context}"""
 
-        print("- Sending analysis prompt to model...")
+        console.print_output("- Sending analysis prompt to model...")
         analysis = self._make_api_request(analysis_prompt)
         
         # Check if clarifying questions are needed
         if '?' in analysis and any(trigger in query.lower() for trigger in ['how', 'which', 'what should', 'recommend', 'suggest']):
-            print("\n=== Clarifying Questions ===")
+            console.print_output("\n=== Clarifying Questions ===")
             questions = [q.strip() for q in analysis.split('\n') if '?' in q]
             answers = {}
             for q in questions:
-                answer = input(f"\n{q}\n> ")
+                answer = console.get_input(f"\n{q}\n> ")
                 answers[q] = answer
             
             # Get response with user's answers
-            print("\n=== Generating Informed Response ===")
+            console.print_output("\n=== Generating Informed Response ===")
             response_prompt = f"""Based on user's responses:
 {answers}
 
@@ -1177,7 +1230,6 @@ Please research and provide information about:
                         confirm = getpass.getpass("Confirm password: ")
                         if password == confirm:
                             break
-                        print("Passwords don't match, try again")
                     
                     key = base64.b64encode(password.encode().ljust(32)[:32])
                     f = Fernet(key)
@@ -1245,7 +1297,6 @@ Please research and provide information about:
                         confirm = getpass.getpass("Confirm password: ")
                         if password == confirm:
                             break
-                        print("Passwords don't match, try again")
                     
                     key = base64.b64encode(password.encode().ljust(32)[:32])
                     f = Fernet(key)
@@ -1273,63 +1324,34 @@ Please research and provide information about:
             os.environ[key] = value
 
 def main():
+    console = ConsoleManager()
     assistant = RaspberryPiAssistant()
     
-    print("Welcome to Raspberry Pi Assistant!")
-    print(f"Detected System: {assistant.pi_model}")
-    print(f"OS: {assistant.os_info.get('PRETTY_NAME', 'Unknown')}")
-    print(f"Model: {assistant.model}")
+    # Show welcome message in output area
+    console.print_output("Welcome to Raspberry Pi Assistant!\n"
+                        f"Detected System: {assistant.pi_model}\n"
+                        f"OS: {assistant.os_info.get('PRETTY_NAME', 'Unknown')}\n"
+                        f"Model: {assistant.model}")
     
     while True:
         try:
-            user_input = input("\nYou (ask a follow-up or say \"Next Question\" to start fresh): ").strip()
+            user_input = console.get_input("\nYou: ")
             
             if user_input.lower() == 'exit':
-                print("\nGoodbye!")
+                console.print_output("\nGoodbye!")
                 break
             
             if user_input.lower() == 'next question':
                 assistant.conversation_history = []
-                print("\nStarting new chat...")
+                console.print_output("\nStarting new chat...")
                 continue
             
-            response = assistant.process_user_query(user_input)
-            command_results = []
-            
-            # Handle command execution if response contains commands
-            if '```' in response:
-                commands = response.split('```')[1::2]  # Get all commands
-                
-                # Check if this is an informative query (read-only commands)
-                is_informative = all(cmd.strip().startswith(('uname', 'cat', 'ls', 'df', 'free', 'dpkg', 'apt list')) 
-                                   for cmd in commands)
-                
-                if is_informative:
-                    # Automatically execute read-only commands
-                    for command in commands:
-                        command = command.strip()
-                        success, result = assistant.execute_command(command)
-                        if success:
-                            command_results.append(f"$ {command}\n{result}")
-                else:
-                    # Interactive mode for system-modifying commands
-                    for command in commands:
-                        command = command.strip()
-                        command = assistant._check_sudo_needed(command)
-                        if command.startswith(('sudo', 'apt-get', 'systemctl')):
-                            execute = input(f"\nWould you like to execute this command?\n{command}\n(y/n): ").lower()
-                            if execute == 'y':
-                                success, result = assistant.execute_with_confirmation(command)
-                                command_results.append(f"Command: {command}\nResult: {result}")
-                                if not success:
-                                    print("Would you like help troubleshooting this error?")
-            
-            # Format and display response
-            formatted_response = assistant.format_response(response, command_results)
-            print("\nAssistant:", formatted_response)
+            response = assistant.process_user_query(user_input, console)
+            formatted_response = assistant.format_response(response, [])
+            console.print_output(f"\nAssistant: {formatted_response}")
             
         except KeyboardInterrupt:
-            print("\nGoodbye!")
+            console.print_output("\nGoodbye!")
             break
 
 if __name__ == "__main__":
