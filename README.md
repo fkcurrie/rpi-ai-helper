@@ -16,7 +16,7 @@
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/rpi-ai-helper.git
+git clone https://github.com/fkcurrie/rpi-ai-helper
 cd rpi-ai-helper
 ```
 
