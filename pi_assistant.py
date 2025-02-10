@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 import base64
 import getpass
 import shutil
+import sys
 
 class ConsoleManager:
     def __init__(self):
@@ -90,7 +91,9 @@ class ConsoleManager:
         
         # Show last 3 prompts (or fewer if history is shorter)
         for i, prompt in enumerate(self.prompt_history[-self.max_history:]):
-            print(f"\033[{start_pos + i};0H\033[K\033[31m{prompt}\033[0m")
+            # Remove any newlines and ensure the line fits within width
+            cleaned_prompt = prompt.replace('\n', ' ')[:self.width]
+            print(f"\033[{start_pos + i};0H\033[K\033[31m{cleaned_prompt}\033[0m")
 
     def get_input(self, prompt: str = "You: ") -> str:
         """Get input from the bottom section"""
@@ -99,13 +102,15 @@ class ConsoleManager:
         
         # Move cursor to input position and get new input
         input_pos = self.height - 1  # Bottom line
-        print(f"\033[{input_pos};0H\033[K\033[31m{prompt}", end="", flush=True)
+        # Remove any newlines from prompt
+        cleaned_prompt = prompt.replace('\n', ' ')
+        print(f"\033[{input_pos};0H\033[K\033[31m{cleaned_prompt}", end="", flush=True)
         user_input = input()
         print("\033[0m", end="")  # Reset color
         
-        # Add to history (full prompt + input)
+        # Add to history (full prompt + input) - ensure no newlines
         if user_input.strip():  # Only add non-empty inputs
-            full_prompt = f"{prompt}{user_input}"
+            full_prompt = f"{cleaned_prompt}{user_input}"
             self.prompt_history.append(full_prompt)
             # Keep only last 3 prompts
             if len(self.prompt_history) > self.max_history:
@@ -123,64 +128,14 @@ class RaspberryPiAssistant:
         """Initialize the assistant"""
         self.os_info = self._get_os_info()
         self.pi_model = self._get_pi_model()
-        self.api_key = None  # Initialize api_key attribute
+        self.api_key = None
         
         print("\nWelcome to Raspberry Pi Assistant!")
         print(f"Detected System: {self.pi_model}")
         print(f"OS: {self.os_info.get('PRETTY_NAME', 'Unknown')}")
         
         # First ask user preference for model type
-        print("\nAvailable Model Types:")
-        print("1. Cloud Models (Claude, requires API key)")
-        print("2. Local Models (via Ollama, runs on your Pi)")
-        
-        while True:
-            choice = input("\nSelect model type (1/2): ").strip()
-            if choice == "1":  # Cloud Models
-                self._handle_api_credentials()  # This will update self.api_key
-                if not self.api_key:
-                    print("\nNo API key found.")
-                    if input("Would you like to enter an API key now? (y/n): ").lower() == 'y':
-                        api_key = getpass.getpass("Enter your API key: ").strip()
-                        self._save_encrypted_credentials({'ANTHROPIC_API_KEY': api_key})
-                        self.api_key = api_key
-                    else:
-                        print("No API key provided. Switching to local models.")
-                        choice = "2"
-                break
-            elif choice == "2":  # Local Models
-                self.api_key = None
-                break
-            else:
-                print("Invalid choice. Please enter 1 or 2.")
-        
-        # Initialize based on choice
-        self.ollama_available = False
-        if choice == "2":  # Local Models
-            print("\nChecking Ollama installation...")
-            binary_exists, service_exists = self._check_ollama_installed()
-            
-            if binary_exists:
-                print("\nOllama is already installed.")
-                if self._check_ollama_service():
-                    self.ollama_available = True
-                    # Show installed models
-                    installed_models = self._get_installed_ollama_models()
-                    if installed_models:
-                        print("\nInstalled Ollama models:")
-                        for model in installed_models:
-                            print(f"- {model['name']} ({model['size']})")
-                    
-                    # Ask about installing additional models
-                    print("\nWould you like to install additional models from Ollama library? (y/n): ", end='')
-                    if input().lower() == 'y':
-                        self._install_ollama_models()
-            else:
-                print("\nOllama is not installed. Would you like to install it? (y/n): ", end='')
-                if input().lower() == 'y':
-                    if self._install_and_start_ollama():
-                        self.ollama_available = True
-                        self._install_ollama_models()
+        self._handle_model_selection()
         
         # Get available models and select one
         self.model, self.is_local = self._get_available_model()
@@ -368,8 +323,65 @@ The system uses apt for package management and systemctl for service control."""
         """Get available models and let user choose"""
         models = []
         
-        # Add latest Claude models if API key exists
-        if self.api_key:
+        if self.model_provider == "google":
+            try:
+                import requests
+                
+                # Get available models from Gemini API
+                url = "https://generativelanguage.googleapis.com/v1/models"
+                headers = {
+                    "x-goog-api-key": self.api_key  # Changed from "Authorization"
+                }
+                
+                response = requests.get(url, headers=headers)
+                
+                if response.status_code == 200:
+                    model_list = response.json().get('models', [])
+                    for model in model_list:
+                        if 'gemini' in model['name'].lower():
+                            name = model['name'].split('/')[-1]  # Get just the model name
+                            description = model.get('description', 'No description available')
+                            version = model.get('version', 'Latest')
+                            models.append((name, False, "google", description, version))
+                else:
+                    print(f"Error getting models: {response.text}")
+                    return None, None
+                
+                if not models:
+                    print("No Gemini models available. Please try a different model type.")
+                    self.model_provider = None
+                    self._handle_model_selection()
+                    return None, None
+                
+                # Sort models by name (newest first)
+                models.sort(key=lambda x: x[0], reverse=True)
+                
+                # Show model table
+                print("\nAvailable models:")
+                headers = ["#", "Model", "Description", "Version"]
+                rows = []
+                for i, (model, _, _, description, version) in enumerate(models, 1):
+                    rows.append([str(i), model, description, version])
+                print(self._create_ascii_table(headers, rows))
+                
+                # Get user choice
+                while True:
+                    choice = input("\nSelect a model number (or press Enter for default): ").strip()
+                    if not choice:
+                        return models[0][0], models[0][1]  # Default to first (newest) model
+                    if choice.isdigit() and 1 <= int(choice) <= len(models):
+                        idx = int(choice) - 1
+                        return models[idx][0], models[idx][1]
+                    print("Invalid selection. Please try again.")
+                
+            except Exception as e:
+                print(f"Error getting Gemini models: {e}")
+                print("Please try a different model type.")
+                self.model_provider = None
+                self._handle_model_selection()
+                return None, None
+
+        elif self.model_provider == "anthropic":
             try:
                 temp_client = Anthropic(api_key=self.api_key)
                 available_models = temp_client.models.list()
@@ -404,10 +416,55 @@ The system uses apt for package management and systemctl for service control."""
                         # Convert to dd/mm/yyyy format
                         release_date = f"{date_str[6:8]}/{date_str[4:6]}/{date_str[:4]}"
                         models.append((model.id, False, 'claude', descriptions[variant], release_date))
-        
-        if not models:
-            print("No models available. Please install a local model or provide an API key.")
-            exit(1)
+                    
+            except Exception as e:
+                print(f"Error getting Claude models: {e}")
+            
+        elif self.model_provider == "local":
+            models = []
+            # Add latest Claude models if API key exists
+            if self.api_key:
+                try:
+                    temp_client = Anthropic(api_key=self.api_key)
+                    available_models = temp_client.models.list()
+                    
+                    # Track latest version of each variant
+                    latest_models = {
+                        'opus': None,
+                        'sonnet': None,
+                        'haiku': None
+                    }
+                    
+                    # Find latest version of each variant
+                    for model in available_models:
+                        if 'claude-3' in model.id.lower():
+                            for variant in latest_models:
+                                if variant in model.id.lower():
+                                    if not latest_models[variant] or model.id > latest_models[variant].id:
+                                        latest_models[variant] = model
+                    
+                    # Add latest models with descriptions and dates
+                    descriptions = {
+                        'opus': "Most capable model for complex tasks",
+                        'sonnet': "Balanced model for general use",
+                        'haiku': "Fast model for simple tasks"
+                    }
+                    
+                    # Extract and format dates from model IDs
+                    for variant, model in latest_models.items():
+                        if model:
+                            # Extract date from model ID (format: YYYYMMDD)
+                            date_str = model.id.split('-')[-1]
+                            # Convert to dd/mm/yyyy format
+                            release_date = f"{date_str[6:8]}/{date_str[4:6]}/{date_str[:4]}"
+                            models.append((model.id, False, 'claude', descriptions[variant], release_date))
+                        
+                except Exception as e:
+                    print(f"Error getting Claude models: {e}")
+            
+            if not models:
+                print("No models available. Please install a local model or provide an API key.")
+                exit(1)
         
         print("\nAvailable models:")
         
@@ -422,84 +479,115 @@ The system uses apt for package management and systemctl for service control."""
         
         print(self._create_ascii_table(headers, rows))
         
-        # Show model details on selection
+        # Get user choice
         while True:
             try:
                 choice = input("\nSelect a model number (or press Enter for default): ").strip()
                 if not choice:
                     model, is_local, model_type, _, _ = models[0]
+                    # Initialize client before returning
+                    self.client = Anthropic(api_key=self.api_key)
+                    return model, is_local
                 else:
                     choice_idx = int(choice) - 1
                     if 0 <= choice_idx < len(models):
                         model, is_local, model_type, _, _ = models[choice_idx]
+                        # Initialize client before returning
+                        self.client = Anthropic(api_key=self.api_key)
+                        return model, is_local
                     else:
                         print("Invalid selection. Please try again.")
-                        continue
-                
-                # Handle model initialization based on type
-                if is_local and model_type == 'ollama':
-                    try:
-                        from ollama import Client as OllamaClient
-                        self.client = OllamaClient()
-                        return model, is_local
-                    except Exception as e:
-                        print(f"Error initializing Ollama model: {e}")
-                        print("Please try another model.")
-                        continue
-                else:  # Cloud model (Claude)
-                    self.client = Anthropic(api_key=self.api_key)
-                    return model, is_local
-                
-            except ValueError:
-                print("Please enter a valid number.")
-            except Exception as e:
-                print(f"Error initializing model: {e}")
-                print("Please try another model.")
+            except (ValueError, IndexError):
+                print("Invalid input. Please enter a valid number.")
 
-    def _make_api_request(self, context: str, retries: int = 0) -> str:
+    def _make_api_request(self, prompt: str) -> str:
         """Make API request with retry logic"""
         try:
-            if self.is_local and hasattr(self.client, 'chat'):  # Ollama models
-                response = self.client.chat(
-                    model=self.model,
-                    messages=[{
-                        'role': 'system',
-                        'content': self.system_context
-                    }, {
-                        'role': 'user',
-                        'content': context
-                    }],
-                    options={
-                        'num_gpu': 0,           # CPU only
-                        'num_thread': 3,        # Use 3 threads for better balance
-                        'num_ctx': 512,         # Reduced context but not too small
-                        'num_batch': 512,       # Increased batch size for better throughput
-                        'num_keep': 5,          # Limit number of tokens to keep in context
-                        'seed': 42,
-                        'temperature': 0.7,
-                        'top_k': 20,            # More focused token selection
-                        'top_p': 0.95,          # Slightly higher nucleus sampling
-                        'repeat_penalty': 1.1,
-                        'mirostat': 2,          # Enable Mirostat 2.0 sampling
-                        'mirostat_tau': 5.0,    # Target entropy
-                        'mirostat_eta': 0.1,    # Learning rate
-                        'f16_kv': True,         # Use float16 for key/value cache
-                        'rope_frequency_base': 10000,  # Adjust attention mechanism
-                        'rope_frequency_scale': 0.5
-                    }
-                )
-                return response['message']['content']
-            else:  # Claude models
+            if self.model_provider == "google":
+                import requests
+                import json
+                
+                # Gemini API endpoint
+                url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent"
+                
+                # Request headers
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key  # Changed from "Authorization"
+                }
+                
+                # Request body
+                data = {
+                    "contents": [{
+                        "parts": [{
+                            "text": prompt
+                        }]
+                    }]
+                }
+                
+                # Make request
+                response = requests.post(url, headers=headers, json=data)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    return result['candidates'][0]['content']['parts'][0]['text']
+                else:
+                    return f"Error: {response.text}"
+            
+            elif self.model_provider == "anthropic":
                 message = self.client.messages.create(
                     model=self.model,
                     max_tokens=1024,
                     temperature=0.7,
                     system=self.system_context,
                     messages=[
-                        {"role": "user", "content": context}
+                        {"role": "user", "content": prompt}
                     ]
                 )
                 return message.content[0].text
+            
+            elif self.model_provider == "local":
+                if self.is_local and hasattr(self.client, 'chat'):  # Ollama models
+                    response = self.client.chat(
+                        model=self.model,
+                        messages=[{
+                            'role': 'system',
+                            'content': self.system_context
+                        }, {
+                            'role': 'user',
+                            'content': prompt
+                        }],
+                        options={
+                            'num_gpu': 0,           # CPU only
+                            'num_thread': 3,        # Use 3 threads for better balance
+                            'num_ctx': 512,         # Reduced context but not too small
+                            'num_batch': 512,       # Increased batch size for better throughput
+                            'num_keep': 5,          # Limit number of tokens to keep in context
+                            'seed': 42,
+                            'temperature': 0.7,
+                            'top_k': 20,            # More focused token selection
+                            'top_p': 0.95,          # Slightly higher nucleus sampling
+                            'repeat_penalty': 1.1,
+                            'mirostat': 2,          # Enable Mirostat 2.0 sampling
+                            'mirostat_tau': 5.0,    # Target entropy
+                            'mirostat_eta': 0.1,    # Learning rate
+                            'f16_kv': True,         # Use float16 for key/value cache
+                            'rope_frequency_base': 10000,  # Adjust attention mechanism
+                            'rope_frequency_scale': 0.5
+                        }
+                    )
+                    return response['message']['content']
+                else:  # Claude models
+                    message = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=1024,
+                        temperature=0.7,
+                        system=self.system_context,
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    return message.content[0].text
                 
         except Exception as e:
             return f"Error communicating with API: {str(e)}"
@@ -521,22 +609,26 @@ The system uses apt for package management and systemctl for service control."""
             
         return "\n".join(formatted)
 
-    def process_user_query(self, query: str, console: ConsoleManager) -> str:
+    def process_user_query(self, query: str, console: ConsoleManager, follow_up_prompt: str = None) -> str:
         """Process user query using RAG approach"""
-        console.print_output("\n=== Building Context ===")
+        # Store query for response formatting
+        self.last_query = query
+        
+        # Build context silently
         context = self._build_rag_context(query)
-        console.print_output("- Gathered system information")
-        console.print_output("- Added conversation history")
-        console.print_output("- Formatted query context")
         
-        console.print_output("\n=== Analyzing Query ===")
+        # Add previous response to context if this is a follow-up
+        if self.conversation_history and len(self.conversation_history) >= 2:
+            last_response = self.conversation_history[-1]['content']
+            context += f"\nPrevious answer: {last_response}"
         
-        # Create analysis prompt
-        analysis_prompt = f"""Based on this query and system context, provide a helpful response.
+        # First prompt to get the command
+        analysis_prompt = follow_up_prompt or f"""Based on this query and system context, provide ONLY the command needed to get the information.
 For system information queries:
-1. If the query can be answered with a command, ONLY provide the command in a code block
-2. DO NOT provide explanations unless specifically asked
-3. Use only safe, read-only commands like: cat, ls, df, free, uname, vcgencmd
+1. ONLY provide the command in a code block - no explanations
+2. Command should only READ information, never modify the system
+3. The system is a Raspberry PI running Rasperian OS
+4. Format: ```command```
 
 Context:
 {context}
@@ -547,33 +639,57 @@ Query:
         
         analysis = self._make_api_request(analysis_prompt)
         
-        # Extract and execute safe informative commands
-        command_results = []
+        # Extract command
         if '```' in analysis:
-            commands = analysis.split('```')[1::2]  # Get all commands between backticks
+            command = analysis.split('```')[1].strip()
             
-            # Check if these are informative (read-only) commands
-            safe_commands = ['cat', 'ls', 'df', 'free', 'uname', 'vcgencmd']
-            is_informative = all(any(cmd.strip().startswith(safe) for safe in safe_commands) 
-                               for cmd in commands)
+            # Ask LLM if command is safe
+            safety_prompt = f"""Analyze this command's safety for a Raspberry Pi:
+Command: {command}
+
+A command is SAFE if it:
+- Only READS information
+- Cannot modify the system
+- Shows status or configuration
+- Lists information
+
+A command is UNSAFE if it:
+- Modifies files or settings
+- Changes system state
+- Installs or removes software
+- Requires root/sudo
+
+Respond with ONLY "SAFE" or "UNSAFE"."""
+
+            safety_check = self._make_api_request(safety_prompt)
             
-            if is_informative:
-                for command in commands:
-                    command = command.strip()
-                    success, result = self.execute_command(command)
-                    if success:
-                        # For temperature queries, format the result nicely
-                        if 'temp' in command:
-                            temp = int(result.strip()) / 1000
-                            command_results.append(f"The current CPU temperature is {temp:.1f}°C")
-                        else:
-                            command_results.append(result.strip())
+            if safety_check.strip() == "SAFE":
+                success, result = self.execute_command(command)
+                if success:
+                    # Send command output to LLM for interpretation
+                    interpretation_prompt = f"""Given this command output, provide a single-line response that directly answers the user's question.
+Focus only on the key information needed to answer: "{query}"
+
+Command output:
+{result}
+
+Format your response as a simple statement without explanations."""
+
+                    interpretation = self._make_api_request(interpretation_prompt)
+                    return interpretation.strip()
+                else:
+                    return f"Error executing command: {result}"
+            else:
+                # Ask LLM why the command is unsafe
+                reason_prompt = f"""Explain briefly why this command is unsafe:
+Command: {command}
+
+Respond with a single, concise sentence."""
+                
+                reason = self._make_api_request(reason_prompt)
+                return f"Command not executed: {reason}"
         
-        # Return just the command output if available, otherwise the full response
-        if command_results:
-            return "\n".join(command_results)
-        else:
-            return analysis
+        return analysis
 
     def execute_with_confirmation(self, command: str) -> Tuple[bool, str]:
         """Execute command with confirmation and real-time output"""
@@ -583,36 +699,19 @@ Query:
         return False, "Command execution cancelled by user"
 
     def _warmup_model(self) -> None:
-        """Send a simple request to warm up the model"""
-        warmup_text = "Hello! Please respond with 'Ready!'"
-        try:
-            if self.is_local:
-                if hasattr(self.client, 'chat'):  # Ollama models
-                    # Set model parameters for lower memory usage
-                    response = self.client.chat(
-                        model=self.model,
-                        messages=[{
-                            'role': 'user',
-                            'content': warmup_text
-                        }],
-                        options={
-                            'num_gpu': 0,  # CPU only
-                            'num_thread': 4,  # Limit threads
-                            'num_ctx': 512,  # Smaller context window
-                            'seed': 42
-                        }
-                    )
-                    if response:
-                        print("Ollama model is ready!")
-            else:  # Cloud models (Claude)
-                response = self._make_api_request(warmup_text)
-                if response:
-                    print("Claude is ready!")
+        """Test the model with a simple query"""
+        if self.model_provider == "google":
+            try:
+                response = self._make_api_request("Say 'Hello from Gemini!'")
+                if not response.startswith("Error"):
+                    print("\nModel test successful!")
                 else:
-                    print("There might be an issue with the API connection...")
-        except Exception as e:
-            print(f"Error initializing model: {e}")
-            print("Please try restarting the assistant.")
+                    print(f"\nWarning: {response}")
+            except Exception as e:
+                print(f"\nWarning: Model warmup failed: {e}")
+                print("The assistant will still try to continue...")
+        
+        # ... existing warmup code for other models ...
 
     def format_response(self, response: str, command_results: List[str] = None) -> str:
         """Format the response in a clear, structured way"""
@@ -634,7 +733,7 @@ Query:
                 for result in command_results:
                     formatted += f"{result}\n"
         else:
-            formatted += "\n=== Response ===\n"
+            formatted += f"\n=== Response [Query: {self.last_query}] ===\n"
             formatted += response
         
         return formatted
@@ -1191,7 +1290,7 @@ Please research and provide information about:
 - Best practices for Raspberry Pi
 """
 
-    def _handle_api_credentials(self) -> None:
+    def _handle_api_credentials(self, env_var: str) -> None:
         """Handle API credentials with encryption"""
         from cryptography.fernet import Fernet
         import base64
@@ -1214,16 +1313,22 @@ Please research and provide information about:
                         encrypted_data = file.read()
                         decrypted_data = f.decrypt(encrypted_data)
                         
-                    # Parse decrypted data
+                    # Parse decrypted data and check for requested API key
+                    api_key_found = False
                     for line in decrypted_data.decode().split('\n'):
                         if '=' in line:
                             key, value = line.strip().split('=', 1)
                             os.environ[key] = value
-                            if key == 'ANTHROPIC_API_KEY':
+                            if key == env_var:
                                 self.api_key = value
+                                api_key_found = True
                     
-                    print("API key loaded successfully!")
-                    return
+                    if api_key_found:
+                        print(f"{env_var} loaded successfully!")
+                        return
+                    else:
+                        print(f"\nNo {env_var} found in encrypted credentials.")
+                        break
                     
                 except Exception as e:
                     if attempt < max_attempts - 1:
@@ -1231,15 +1336,18 @@ Please research and provide information about:
                     else:
                         print(f"Error decrypting credentials after {max_attempts} attempts.")
         
-        # If we get here, either no encrypted file exists or decryption failed
-        self.api_key = os.getenv('ANTHROPIC_API_KEY')
+        # If we get here, either no encrypted file exists, decryption failed, or key not found
+        self.api_key = os.getenv(env_var)
         
         if not self.api_key:
-            print("\nNo API key found.")
+            print(f"\nNo {env_var} found.")
             if input("Would you like to enter an API key now? (y/n): ").lower() == 'y':
                 api_key = getpass.getpass("Enter your API key: ").strip()
-                self._save_encrypted_credentials({'ANTHROPIC_API_KEY': api_key})
+                self._save_encrypted_credentials({env_var: api_key})
                 self.api_key = api_key
+            else:
+                print("\nNo API key provided. Please choose a different model type.")
+                self._handle_model_selection()
 
     def _save_encrypted_credentials(self, credentials: Dict) -> None:
         """Save encrypted credentials to file"""
@@ -1276,6 +1384,30 @@ Please research and provide information about:
             print(f"\nError saving credentials: {e}")
             print("Please try again or contact support.")
 
+    def _handle_model_selection(self):
+        """Handle model type selection"""
+        print("\nAvailable Model Types:")
+        print("1. Claude (Anthropic, requires API key)")
+        print("2. Gemini (Google, requires API key)")
+        print("3. Local Models (via Ollama, runs on your Pi)")
+        
+        while True:
+            choice = input("\nSelect model type (1/2/3): ").strip()
+            if choice == "1":
+                self.model_provider = "anthropic"
+                self._handle_api_credentials("ANTHROPIC_API_KEY")
+                break
+            elif choice == "2":
+                self.model_provider = "google"
+                self._handle_api_credentials("GOOGLE_API_KEY")
+                break
+            elif choice == "3":
+                self.model_provider = "local"
+                self.api_key = None
+                break
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.")
+
 def main():
     console = ConsoleManager()
     assistant = RaspberryPiAssistant()
@@ -1284,22 +1416,41 @@ def main():
     console.print_output("Welcome to Raspberry Pi Assistant!\n"
                         f"Detected System: {assistant.pi_model}\n"
                         f"OS: {assistant.os_info.get('PRETTY_NAME', 'Unknown')}\n"
-                        f"Model: {assistant.model}")
+                        f"Model: {assistant.model}\n\n"
+                        "Type 'New Topic' to start a fresh conversation.")
     
     while True:
         try:
-            user_input = console.get_input("\nYou: ")
+            user_input = console.get_input("\nYou ('New Topic' to reset context): ")
             
             if user_input.lower() == 'exit':
                 console.print_output("\nGoodbye!")
                 break
             
-            if user_input.lower() == 'next question':
+            if user_input.lower() == 'new topic':
+                # Clear conversation history
                 assistant.conversation_history = []
-                console.print_output("\nStarting new chat...")
+                # Clear output buffer
+                console.output_buffer = []
+                # Clear prompt history
+                console.prompt_history = []
+                # Clear screen and show fresh welcome
+                console.print_output("Starting fresh conversation...")
                 continue
             
-            response = assistant.process_user_query(user_input, console)
+            # Create follow-up prompt if this isn't the first question
+            if assistant.conversation_history:
+                context = assistant._build_rag_context(user_input)
+                analysis_prompt = f"""This is a follow-up question in our conversation about {context}.
+Based on the previous context and this new query, provide ONLY the command needed.
+Use these safe commands: cat, ls, df, free, uname, vcgencmd, systemctl status
+
+Query: {user_input}
+"""
+            else:
+                analysis_prompt = None  # Let process_user_query create the initial prompt
+            
+            response = assistant.process_user_query(user_input, console, analysis_prompt)
             formatted_response = assistant.format_response(response, [])
             console.print_output(f"\nAssistant: {formatted_response}")
             
