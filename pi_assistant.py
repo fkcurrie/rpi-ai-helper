@@ -69,12 +69,15 @@ class ConsoleManager:
             if current_line:
                 self.output_buffer.append(current_line)
         
-        # Trim buffer to fit output area
-        while len(self.output_buffer) > self.output_height:
+        # Keep last line visible by trimming from start when buffer is full
+        visible_lines = self.output_height - 2  # Leave 2 lines margin
+        while len(self.output_buffer) > visible_lines:
             self.output_buffer.pop(0)
         
-        # Print buffer
+        # Print buffer with margin at bottom
         print("\033[H", end="")
+        empty_lines = max(0, visible_lines - len(self.output_buffer))
+        print("\n" * empty_lines, end="")
         for line in self.output_buffer:
             print(f"{line:<{self.width}}")
         
@@ -129,6 +132,7 @@ class RaspberryPiAssistant:
         self.os_info = self._get_os_info()
         self.pi_model = self._get_pi_model()
         self.api_key = None
+        self.last_query = None
         
         print("\nWelcome to Raspberry Pi Assistant!")
         print(f"Detected System: {self.pi_model}")
@@ -182,29 +186,23 @@ class RaspberryPiAssistant:
 
     def _build_system_context(self) -> str:
         """Build system context for LLM prompts"""
-        is_root = os.geteuid() == 0
-        return f"""You are a helpful assistant for Raspberry Pi users. Current system information:
-- Device: {self.pi_model}
-- OS: {self.os_info.get('PRETTY_NAME', 'Unknown')}
-- Architecture: ARM
-- Model: {self.model}
-- Running as root: {is_root}
+        return f"""You are a Raspberry Pi assistant helping users with their {self.pi_model} running {self.os_info.get('PRETTY_NAME', 'Unknown')}.
+Always provide specific advice for Raspberry Pi systems, considering:
+- ARM architecture ({self.pi_model})
+- Limited resources (RAM, CPU, storage)
+- Raspberry Pi OS compatibility
+- Common Raspberry Pi use cases
 
-For informative queries:
-1. Provide a single-line response using the command output
-2. Format: "The [item] is [value from command]"
-3. For comparison queries (latest version, updates available, etc.):
-   - Check the Raspberry Pi OS documentation
-   - Compare with current system values
-   - Provide clear yes/no answers with version numbers
-4. For multiple values, use bullet points
-
-For action queries:
-1. List each command on a single line with a short description:
-   ```command``` - What this command does
-2. Keep explanations concise
-
-The system uses apt for package management and systemctl for service control."""
+When discussing software or solutions:
+1. Focus on ARM-compatible options
+2. Consider resource constraints
+3. Prefer official Raspberry Pi repositories
+4. Format responses clearly with:
+   - Short paragraphs
+   - Bullet points for lists
+   - Clear headings for sections
+   - Code blocks for commands
+"""
 
     def execute_command(self, command: str) -> Tuple[bool, str]:
         """Execute a shell command and show real-time output"""
@@ -298,11 +296,21 @@ The system uses apt for package management and systemctl for service control."""
 
     def _create_ascii_table(self, headers: List[str], rows: List[List[str]]) -> str:
         """Create an ASCII table with the given headers and rows"""
-        # Calculate column widths
+        # Define maximum widths for each column
+        max_widths = {
+            "Model": 30,        # Model name
+            "Description": 60,  # Description text
+            "Released": 12,     # Date
+            "#": 3             # Number
+        }
+        
+        # Calculate optimal column widths within limits
         widths = []
-        for i in range(len(headers)):
+        for i, header in enumerate(headers):
             column = [str(row[i]) for row in rows]
-            widths.append(max(len(str(x)) for x in [headers[i]] + column))
+            max_width = max_widths.get(header, 20)  # Default to 20 if not specified
+            width = min(max_width, max(len(str(x)) for x in [header] + column))
+            widths.append(width)
         
         # Create the table
         separator = '+' + '+'.join('-' * (w + 2) for w in widths) + '+'
@@ -312,9 +320,25 @@ The system uses apt for package management and systemctl for service control."""
         header = '|' + '|'.join(f' {h:<{w}} ' for h, w in zip(headers, widths)) + '|'
         result.extend([header, separator])
         
-        # Add rows
+        # Add rows with text wrapping for description
         for row in rows:
-            result.append('|' + '|'.join(f' {str(c):<{w}} ' for c, w in zip(row, widths)) + '|')
+            # Handle description column wrapping
+            desc_col = headers.index("Description") if "Description" in headers else -1
+            if desc_col >= 0 and len(str(row[desc_col])) > widths[desc_col]:
+                # Wrap description text
+                import textwrap
+                desc_lines = textwrap.wrap(str(row[desc_col]), widths[desc_col])
+                first_line = True
+                for desc in desc_lines:
+                    if first_line:
+                        line = [str(row[i]) if i != desc_col else desc for i in range(len(row))]
+                        first_line = False
+                    else:
+                        line = [''] * len(row)
+                        line[desc_col] = desc
+                    result.append('|' + '|'.join(f' {str(c):<{w}} ' for c, w in zip(line, widths)) + '|')
+            else:
+                result.append('|' + '|'.join(f' {str(c):<{w}} ' for c, w in zip(row, widths)) + '|')
         
         result.append(separator)
         return '\n'.join(result)
@@ -330,7 +354,7 @@ The system uses apt for package management and systemctl for service control."""
                 # Get available models from Gemini API
                 url = "https://generativelanguage.googleapis.com/v1/models"
                 headers = {
-                    "x-goog-api-key": self.api_key  # Changed from "Authorization"
+                    "x-goog-api-key": self.api_key
                 }
                 
                 response = requests.get(url, headers=headers)
@@ -338,23 +362,39 @@ The system uses apt for package management and systemctl for service control."""
                 if response.status_code == 200:
                     model_list = response.json().get('models', [])
                     for model in model_list:
-                        if 'gemini' in model['name'].lower():
-                            name = model['name'].split('/')[-1]  # Get just the model name
-                            description = model.get('description', 'No description available')
-                            version = model.get('version', 'Latest')
+                        name = model['name'].split('/')[-1]
+                        description = model.get('description', 'No description available')
+                        version = model.get('version', 'Latest')
+                        
+                        # Include both pro and flash variants for 1.5 and 2.0
+                        if (('gemini-1.5' in name.lower() or 'gemini-2' in name.lower()) and 
+                            ('pro' in name.lower() or 'flash' in name.lower()) and
+                            'deprecated' not in description.lower() and 
+                            'discontinued' not in description.lower() and
+                            'vision' not in name.lower()):
                             models.append((name, False, "google", description, version))
-                else:
-                    print(f"Error getting models: {response.text}")
-                    return None, None
+                
+                # Sort models by version and type
+                def sort_key(x):
+                    name = x[0]
+                    # Primary sort by version
+                    if 'gemini-2' in name.lower():
+                        version_score = 2
+                    else:  # gemini-1.5
+                        version_score = 1
+                    
+                    # Secondary sort by type (pro before flash)
+                    type_score = 1 if 'pro' in name.lower() else 0
+                    
+                    return (version_score, type_score, x[4])
+                
+                models.sort(key=sort_key, reverse=True)
                 
                 if not models:
                     print("No Gemini models available. Please try a different model type.")
                     self.model_provider = None
                     self._handle_model_selection()
                     return None, None
-                
-                # Sort models by name (newest first)
-                models.sort(key=lambda x: x[0], reverse=True)
                 
                 # Show model table
                 print("\nAvailable models:")
@@ -507,22 +547,41 @@ The system uses apt for package management and systemctl for service control."""
                 import requests
                 import json
                 
+                # Add system context to the prompt
+                enhanced_prompt = f"""As a Raspberry Pi assistant for a {self.pi_model} running {self.os_info.get('PRETTY_NAME', 'Unknown')}, 
+please provide specific advice considering ARM architecture and resource constraints.
+
+User Query: {prompt}
+
+Format your response with:
+- Clear sections with headings
+- Bullet points for lists
+- Short, focused paragraphs
+- Code blocks for commands
+- Resource-aware recommendations
+"""
+                
                 # Gemini API endpoint
                 url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent"
                 
                 # Request headers
                 headers = {
                     "Content-Type": "application/json",
-                    "x-goog-api-key": self.api_key  # Changed from "Authorization"
+                    "x-goog-api-key": self.api_key
                 }
                 
                 # Request body
                 data = {
                     "contents": [{
                         "parts": [{
-                            "text": prompt
+                            "text": enhanced_prompt
                         }]
-                    }]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.7,
+                        "topK": 40,
+                        "topP": 0.8,
+                    }
                 }
                 
                 # Make request
@@ -530,7 +589,11 @@ The system uses apt for package management and systemctl for service control."""
                 
                 if response.status_code == 200:
                     result = response.json()
-                    return result['candidates'][0]['content']['parts'][0]['text']
+                    raw_text = result['candidates'][0]['content']['parts'][0]['text']
+                    
+                    # Format the response
+                    formatted_text = self._format_gemini_response(raw_text)
+                    return formatted_text
                 else:
                     return f"Error: {response.text}"
             
@@ -592,6 +655,48 @@ The system uses apt for package management and systemctl for service control."""
         except Exception as e:
             return f"Error communicating with API: {str(e)}"
 
+    def _format_gemini_response(self, text: str) -> str:
+        """Format Gemini response for better readability"""
+        # Split into lines and remove empty lines at start/end
+        lines = text.strip().split('\n')
+        
+        # Format bullet points and links consistently
+        formatted_lines = []
+        current_section = ""
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Handle headings
+            if line.upper() == line and len(line) > 3:  # Section heading
+                formatted_lines.extend(['', f"\n{line}", '-' * len(line), ''])
+                current_section = line
+            elif line.startswith('#'):  # Markdown heading
+                clean_line = line.lstrip('#').strip()
+                formatted_lines.extend(['', clean_line, '-' * len(clean_line), ''])
+                current_section = clean_line
+            # Handle bullet points
+            elif line.startswith('*') or line.startswith('-'):
+                formatted_lines.append(f"• {line[1:].strip()}")
+            # Handle code blocks
+            elif line.startswith('```'):
+                if current_section:
+                    formatted_lines.append(f"\nCommand for {current_section}:")
+                formatted_lines.append('  ' + line.strip('`'))
+            # Normal text
+            elif line:
+                formatted_lines.append(line)
+        
+        # Remove duplicate empty lines
+        result = []
+        prev_empty = False
+        for line in formatted_lines:
+            if line.strip() or not prev_empty:
+                result.append(line)
+            prev_empty = not line.strip()
+        
+        return '\n'.join(result)
+
     def _format_conversation_history(self) -> str:
         """Format recent conversation history for context"""
         if not self.conversation_history:
@@ -609,87 +714,45 @@ The system uses apt for package management and systemctl for service control."""
             
         return "\n".join(formatted)
 
-    def process_user_query(self, query: str, console: ConsoleManager, follow_up_prompt: str = None) -> str:
-        """Process user query using RAG approach"""
-        # Store query for response formatting
-        self.last_query = query
-        
-        # Build context silently
-        context = self._build_rag_context(query)
-        
-        # Add previous response to context if this is a follow-up
-        if self.conversation_history and len(self.conversation_history) >= 2:
-            last_response = self.conversation_history[-1]['content']
-            context += f"\nPrevious answer: {last_response}"
-        
-        # First prompt to get the command
-        analysis_prompt = follow_up_prompt or f"""Based on this query and system context, provide ONLY the command needed to get the information.
-For system information queries:
-1. ONLY provide the command in a code block - no explanations
-2. Command should only READ information, never modify the system
-3. The system is a Raspberry PI running Rasperian OS
-4. Format: ```command```
-
-Context:
-{context}
-
-Query:
-{query}
-"""
-        
-        analysis = self._make_api_request(analysis_prompt)
-        
-        # Extract command
-        if '```' in analysis:
-            command = analysis.split('```')[1].strip()
+    def process_user_query(self, query: str, console: ConsoleManager, analysis_prompt: Optional[str] = None) -> str:
+        """Process user query and return response"""
+        try:
+            # Store the query
+            self.last_query = query
             
-            # Ask LLM if command is safe
-            safety_prompt = f"""Analyze this command's safety for a Raspberry Pi:
-Command: {command}
-
-A command is SAFE if it:
-- Only READS information
-- Cannot modify the system
-- Shows status or configuration
-- Lists information
-
-A command is UNSAFE if it:
-- Modifies files or settings
-- Changes system state
-- Installs or removes software
-- Requires root/sudo
-
-Respond with ONLY "SAFE" or "UNSAFE"."""
-
-            safety_check = self._make_api_request(safety_prompt)
+            # Check if this is a command execution request
+            if query.strip().startswith('!') or query.strip().startswith('sudo'):
+                return self._handle_command_execution(query)
             
-            if safety_check.strip() == "SAFE":
-                success, result = self.execute_command(command)
-                if success:
-                    # Send command output to LLM for interpretation
-                    interpretation_prompt = f"""Given this command output, provide a single-line response that directly answers the user's question.
-Focus only on the key information needed to answer: "{query}"
-
-Command output:
-{result}
-
-Format your response as a simple statement without explanations."""
-
-                    interpretation = self._make_api_request(interpretation_prompt)
-                    return interpretation.strip()
-                else:
-                    return f"Error executing command: {result}"
-            else:
-                # Ask LLM why the command is unsafe
-                reason_prompt = f"""Explain briefly why this command is unsafe:
-Command: {command}
-
-Respond with a single, concise sentence."""
-                
-                reason = self._make_api_request(reason_prompt)
-                return f"Command not executed: {reason}"
+            # For information requests, just get the response from the model
+            prompt = analysis_prompt if analysis_prompt else query
+            response = self._make_api_request(prompt)
+            
+            # Add to conversation history
+            self.conversation_history.append({
+                'role': 'user',
+                'content': query
+            })
+            self.conversation_history.append({
+                'role': 'assistant',
+                'content': response
+            })
+            
+            return response
         
-        return analysis
+        except Exception as e:
+            return f"Error processing query: {str(e)}"
+
+    def _handle_command_execution(self, command: str) -> str:
+        """Handle execution of system commands"""
+        if not self._is_safe_command(command):
+            return "Command not executed: This command has been blocked for safety reasons."
+        
+        success, output = self.execute_command(command)
+        if success:
+            return f"Command executed successfully:\n{output}"
+        else:
+            return f"Command failed:\n{output}"
 
     def execute_with_confirmation(self, command: str) -> Tuple[bool, str]:
         """Execute command with confirmation and real-time output"""
@@ -713,28 +776,20 @@ Respond with a single, concise sentence."""
         
         # ... existing warmup code for other models ...
 
-    def format_response(self, response: str, command_results: List[str] = None) -> str:
-        """Format the response in a clear, structured way"""
+    def format_response(self, response: str, command_results: List[str]) -> str:
+        """Format the response for display"""
         formatted = ""
         
+        if self.last_query:
+            formatted += f"\nQuestion: {self.last_query}\n"
+        
+        if response:
+            formatted += f"\nAnswer: {response}\n"
+        
         if command_results:
-            # For informative queries, just show the command output
-            if command_results[0].startswith('$'):
-                result = command_results[0].split('\n')[1].strip()
-                # Store the full kernel version in conversation history
-                if 'uname' in command_results[0]:
-                    self.conversation_history.append({
-                        "role": "system",
-                        "content": f"kernel_version={result}"
-                    })
-                formatted = f"\nThe kernel version is {result}\n"
-            else:
-                formatted += "\n=== Command Results ===\n"
-                for result in command_results:
-                    formatted += f"{result}\n"
-        else:
-            formatted += f"\n=== Response [Query: {self.last_query}] ===\n"
-            formatted += response
+            formatted += "\nSystem Information:\n"
+            for result in command_results:
+                formatted += f"{result}\n"
         
         return formatted
 
